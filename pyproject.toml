@@ -3,6 +3,7 @@ name = "lakefs-glue"
 version = "0.1.0"
 description = "Set up AWS Glue Catalog Federation for lakeFS Iceberg REST Catalog"
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.11"
 dependencies = [
     "boto3>=1.42.78",
