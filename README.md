@@ -46,7 +46,7 @@ The external catalog is only used for **metadata discovery**. All data access go
 Using [uv](https://docs.astral.sh/uv/) (no install needed):
 
 ```bash
-uvx lakefs-glue-federation \
+uvx lakefs-glue federate \
     --lakefs-url https://my-org.us-east-1.lakefscloud.io \
     --lakefs-repo my-repo \
     --lakefs-ref main \
@@ -58,9 +58,9 @@ uvx lakefs-glue-federation \
 Using pip:
 
 ```bash
-pip install lakefs-glue-federation
+pip install lakefs-glue
 
-lakefs-glue-federation \
+lakefs-glue federate \
     --lakefs-url https://my-org.us-east-1.lakefscloud.io \
     --lakefs-repo my-repo \
     --lakefs-ref main \
@@ -72,16 +72,16 @@ lakefs-glue-federation \
 From source:
 
 ```bash
-git clone https://github.com/treeverse/lakefs-glue-federation.git
-cd lakefs-glue-federation
+git clone https://github.com/treeverse/lakefs-glue.git
+cd lakefs-glue
 
 # Using uv
 uv sync
-uv run lakefs-glue-federation --help
+uv run lakefs-glue --help
 
 # Or using pip
 pip install -e .
-lakefs-glue-federation --help
+lakefs-glue --help
 ```
 
 Query from Athena:
@@ -109,21 +109,21 @@ Each federated catalog is scoped to a single lakeFS **repository + ref** (branch
 
 ```bash
 # Main branch
-uvx lakefs-glue-federation \
+lakefs-glue federate \
     --lakefs-url https://my-org.lakefscloud.io \
     --lakefs-repo my-repo --lakefs-ref main \
     --catalog-name my-repo-main \
     --lakefs-access-key-id ... --lakefs-secret-access-key ...
 
 # Dev branch
-uvx lakefs-glue-federation \
+lakefs-glue federate \
     --lakefs-url https://my-org.lakefscloud.io \
     --lakefs-repo my-repo --lakefs-ref dev \
     --catalog-name my-repo-dev \
     --lakefs-access-key-id ... --lakefs-secret-access-key ...
 
 # A tagged release (point-in-time snapshot)
-uvx lakefs-glue-federation \
+lakefs-glue federate \
     --lakefs-url https://my-org.lakefscloud.io \
     --lakefs-repo my-repo --lakefs-ref v1.0 \
     --catalog-name my-repo-v1 \
@@ -144,6 +144,22 @@ All catalogs appear independently in Athena and Lake Formation. This lets you qu
 | Lake Formation grants | (on the catalog) | Permissions for specified principals |
 
 The script is **idempotent** -- rerunning with the same parameters updates resources in place. Rerunning with changed parameters (e.g., different branch or credentials) converges to the new state.
+
+### Remove
+
+To remove a specific federated catalog and its associated resources (connection, Lake Formation registration, Secrets Manager secret, and IAM role):
+
+```bash
+lakefs-glue rm my-catalog
+```
+
+To discover and remove all federated catalogs in the account:
+
+```bash
+lakefs-glue rm --all
+```
+
+Use `--yes` to skip the confirmation prompt. Use `--region` to target a specific AWS region (default: `us-east-1`).
 
 ## Limitations
 

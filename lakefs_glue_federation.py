@@ -32,7 +32,7 @@ Important implementation notes (discovered through testing, March 2026):
       in the Lake Formation console UI.
 
 Usage:
-    uv run setup_federation.py \\
+    lakefs-glue federate \\
         --lakefs-url https://my-org.us-east-1.lakefscloud.io \\
         --lakefs-repo my-repo \\
         --lakefs-access-key-id AKIAIOSFODNN7EXAMPLE \\
@@ -82,6 +82,7 @@ def get_storage_bucket(lakefs_url, access_key_id, secret_access_key, repo_name):
     click.echo(f"  Storage namespace: {repo.storage_namespace}")
     click.echo(f"  S3 bucket: {bucket}")
     return bucket
+
 
 
 # ---------------------------------------------------------------------------
@@ -244,12 +245,17 @@ def ensure_lf_admin(lf, sts):
 # Main CLI
 # ---------------------------------------------------------------------------
 
-@click.command()
+@click.group()
+def cli():
+    """Manage AWS Glue Catalog Federation for lakeFS Iceberg REST Catalogs."""
+
+
+@cli.command()
 @click.option('--lakefs-url', required=True,
               help='lakeFS server URL (e.g. https://my-org.us-east-1.lakefscloud.io)')
 @click.option('--lakefs-repo', required=True,
               help='lakeFS repository name')
-@click.option('--lakefs-branch', default='main', show_default=True,
+@click.option('--lakefs-ref', default='main', show_default=True,
               help='lakeFS ref to expose (branch, tag, or commit ID)')
 @click.option('--lakefs-access-key-id', required=True,
               help='lakeFS access key ID (used as OAuth2 client_id)')
@@ -261,15 +267,15 @@ def ensure_lf_admin(lf, sts):
               help='AWS region')
 @click.option('--grant-to', multiple=True,
               help='IAM role/user ARNs to grant full catalog access (repeatable)')
-def setup(lakefs_url, lakefs_repo, lakefs_ref, lakefs_access_key_id,
-          lakefs_secret_access_key, catalog_name, region, grant_to):
+def federate(lakefs_url, lakefs_repo, lakefs_ref, lakefs_access_key_id,
+             lakefs_secret_access_key, catalog_name, region, grant_to):
     """Set up AWS Glue Catalog Federation for a lakeFS Iceberg REST Catalog.
 
     Idempotent -- safe to rerun. Existing resources are updated in place.
 
     Creates a federated catalog that allows Athena, Redshift, and EMR to query
     Iceberg tables managed by lakeFS. Each catalog is scoped to a single
-    lakeFS repository + branch combination.
+    lakeFS repository + ref combination.
     """
 
     lakefs_url = lakefs_url.rstrip('/')
@@ -436,21 +442,19 @@ def setup(lakefs_url, lakefs_repo, lakefs_ref, lakefs_access_key_id,
     # DataLakeAccessProperties is included to match the AWS Console's
     # behavior, though federation works without it.
     click.echo("[6/7] Ensuring federated catalog...")
+    catalog_input = {
+        'CatalogProperties': {
+            'DataLakeAccessProperties': {},
+        },
+        'CreateDatabaseDefaultPermissions': [],
+        'CreateTableDefaultPermissions': [],
+        'FederatedCatalog': {
+            'ConnectionName': connection_name,
+            'Identifier': lakefs_repo,
+        },
+    }
     try:
-        glue.create_catalog(
-            Name=catalog_name,
-            CatalogInput={
-                'CatalogProperties': {
-                    'DataLakeAccessProperties': {},
-                },
-                'CreateDatabaseDefaultPermissions': [],
-                'CreateTableDefaultPermissions': [],
-                'FederatedCatalog': {
-                    'ConnectionName': connection_name,
-                    'Identifier': lakefs_repo,
-                },
-            },
-        )
+        glue.create_catalog(Name=catalog_name, CatalogInput=catalog_input)
         click.echo(f"  Created catalog: {catalog_name}")
     except ClientError as e:
         if e.response['Error']['Code'] == 'AlreadyExistsException':
@@ -503,5 +507,124 @@ def setup(lakefs_url, lakefs_repo, lakefs_ref, lakefs_access_key_id,
     click.echo(f'  SELECT * FROM "{catalog_name}"."<namespace>"."<table>" LIMIT 10;')
 
 
+# ---------------------------------------------------------------------------
+# Remove CLI
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument('catalog_name', required=False, default=None)
+@click.option('--all', 'all_catalogs', is_flag=True,
+              help='Discover and remove all federated catalogs')
+@click.option('--region', default='us-east-1', show_default=True,
+              help='AWS region')
+@click.option('--yes', is_flag=True, help='Skip confirmation prompt')
+@click.pass_context
+def rm(ctx, catalog_name, all_catalogs, region, yes):
+    """Remove federated catalogs and their associated AWS resources.
+
+    Pass a CATALOG_NAME to remove a specific catalog, or --all to discover
+    and remove every ICEBERGRESTCATALOG federated catalog in the account.
+    """
+
+    if not catalog_name and not all_catalogs:
+        click.echo(ctx.get_help())
+        return
+
+    session = boto3.Session(region_name=region)
+    glue = session.client('glue')
+    lf = session.client('lakeformation')
+    iam = session.client('iam')
+    sm = session.client('secretsmanager')
+    sts = session.client('sts')
+    account_id = get_account_id(sts)
+
+    # List all catalogs
+    catalogs = glue.get_catalogs()['CatalogList']
+    federated = [c for c in catalogs
+                 if c.get('FederatedCatalog', {}).get('ConnectionType') == 'ICEBERGRESTCATALOG']
+
+    if catalog_name:
+        federated = [c for c in federated if c['Name'] == catalog_name]
+        if not federated:
+            click.echo(f"No federated catalog named '{catalog_name}' found.")
+            return
+
+    if not federated:
+        click.echo("No ICEBERGRESTCATALOG federated catalogs found.")
+        return
+
+    click.echo(f"Found {len(federated)} federated catalog(s):\n")
+    for i, cat in enumerate(federated):
+        name = cat['Name']
+        conn = cat['FederatedCatalog'].get('ConnectionName', '?')
+        ident = cat['FederatedCatalog'].get('Identifier', '?')
+        click.echo(f"  [{i+1}] {name}  (connection: {conn}, identifier: {ident})")
+
+    click.echo()
+    if not yes:
+        if not click.confirm(f"Delete {'this catalog' if len(federated) == 1 else 'all of these'}?"):
+            click.echo("Aborted.")
+            return
+
+    errors = False
+    for cat in federated:
+        name = cat['Name']
+        catalog_id = f'{account_id}:{name}'
+        conn_name = cat['FederatedCatalog'].get('ConnectionName', '')
+        conn_arn = f'arn:aws:glue:{region}:{account_id}:connection/{conn_name}'
+
+        click.echo(f"\n  Deleting {name}...")
+
+        # 1. Delete catalog
+        try:
+            glue.delete_catalog(CatalogId=catalog_id)
+            click.echo(f"    Deleted catalog: {catalog_id}")
+        except ClientError as e:
+            errors = True
+            click.echo(f"    Catalog: {e.response['Error']['Message']}", err=True)
+
+        # 2. Deregister from Lake Formation
+        try:
+            lf.deregister_resource(ResourceArn=conn_arn)
+            click.echo(f"    Deregistered LF resource: {conn_arn}")
+        except ClientError as e:
+            errors = True
+            click.echo(f"    LF resource: {e.response['Error']['Message']}", err=True)
+
+        # 3. Delete connection
+        try:
+            glue.delete_connection(ConnectionName=conn_name)
+            click.echo(f"    Deleted connection: {conn_name}")
+        except ClientError as e:
+            errors = True
+            click.echo(f"    Connection: {e.response['Error']['Message']}", err=True)
+
+        # 4. Delete Secrets Manager secret
+        secret_name = f'{name}-secret'
+        try:
+            sm.delete_secret(SecretId=secret_name, ForceDeleteWithoutRecovery=True)
+            click.echo(f"    Deleted secret: {secret_name}")
+        except ClientError as e:
+            errors = True
+            click.echo(f"    Secret: {e.response['Error']['Message']}", err=True)
+
+        # 5. Delete IAM role (must remove inline policies first)
+        role_name = f'{name}-GlueConnectionRole'
+        try:
+            policies = iam.list_role_policies(RoleName=role_name)['PolicyNames']
+            for policy in policies:
+                iam.delete_role_policy(RoleName=role_name, PolicyName=policy)
+                click.echo(f"    Removed policy: {policy}")
+            iam.delete_role(RoleName=role_name)
+            click.echo(f"    Deleted role: {role_name}")
+        except ClientError as e:
+            errors = True
+            click.echo(f"    Role: {e.response['Error']['Message']}", err=True)
+
+    if errors:
+        raise SystemExit(1)
+    click.echo("\nDone.")
+
+
 if __name__ == '__main__':
-    setup()
+    cli()

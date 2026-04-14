@@ -1,5 +1,5 @@
 [project]
-name = "lakefs-glue-federation"
+name = "lakefs-glue"
 version = "0.1.0"
 description = "Set up AWS Glue Catalog Federation for lakeFS Iceberg REST Catalog"
 readme = "README.md"
@@ -14,6 +14,8 @@ dependencies = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build.targets.wheel]
+packages = ["lakefs_glue_federation.py"]
+
 [project.scripts]
-lakefs-glue-federation = "lakefs_glue_federation:setup"
-cleanup-federation = "cleanup:cleanup"
+lakefs-glue = "lakefs_glue_federation:cli"
