@@ -42,6 +42,7 @@ Usage:
 
 import json
 import time
+from importlib.metadata import PackageNotFoundError, version
 from urllib.parse import urlparse
 
 import boto3
@@ -75,6 +76,11 @@ def get_storage_bucket(lakefs_url, access_key_id, secret_access_key, repo_name):
         password=secret_access_key,
     )
     client = lakefs_sdk.ApiClient(config)
+    try:
+        pkg_version = version('lakefs-glue')
+    except PackageNotFoundError:
+        pkg_version = 'dev'
+    client.user_agent = f'lakefs-glue-federate/{pkg_version}'
     api = lakefs_sdk.RepositoriesApi(client)
     repo = api.get_repository(repo_name)
     parsed = urlparse(repo.storage_namespace)
